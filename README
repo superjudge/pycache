@@ -1,0 +1,456 @@
+
+Pycache is a simple implementation of a distributed hash table. The
+main purpose of the implementation is experimentation with DHT
+principles.
+
+Pycache is implemented in pure Python. It depends on gevent, which
+in turn depends on greenlet. Pycache has been developed and tested
+using Python 2.7.1, gevent 0.13.6, and greenlet 0.3.1 on
+Mac OS X 10.6.7.
+
+Pycache implements the the memcached protocol; it has been tested
+using pylibmc 1.1.1, but it should be usable with any memcached
+client. Pycache only implements the text-based version of the
+memcached protocol. It is thus also possible to issue commands using
+e.g. a telnet connection. There are some limitations in the memcached
+protocol support, which are described later in this document.
+
+
+Using Pycache
+==============================================================================
+
+Start a Pycache node like this:
+
+$ python pycache.py --addr 127.0.0.1:6000
+
+The -addr parameter tells Pycache which address to listen to. Note
+that at the momemnt you can not use an address like '0.0.0.0:6000' to
+listen to all interfaces. Pycache will start up with such an address,
+but it will not work in later stages, when you add additional peers.
+
+To start a second instance, you need to tell it about one peers.
+
+$ python pycache.py --addr 127.0.0.1:6001 --peer 127.0.0.1:6000
+
+This will start a second instance, which will contact the first
+instance and join the mesh.
+
+You can now connect to any of the nodes, either using a memcached
+client (such as pylibmc) or telnet. Per default, the Pycache instances
+will log on the INFO level, so when you issue commands you should be
+able to see how the difference instances handles them.
+
+We will here give a series of examples that are meant to be run in
+sequence, showing many of the features of Pycache. Note that all
+examples need to be run in different shells, as Pycache does not
+support a daemon mode.
+
+Ex 1: Start the first node
+
+$ python pycache.py --addr 127.0.0.1:6000
+INFO:root:Starting server @ 127.0.0.1:6000
+INFO:root:Server ID 793023952729318858436183708676502847422008045537 @ 127.0.0.1:6000 peers set([])
+
+Ex 2: Start the second node
+
+$ python pycache.py --addr 127.0.0.1:6001
+INFO:root:Starting server @ 127.0.0.1:6001
+INFO:root:Server ID 1028608665736931134879629470243750787007437450801 @ 127.0.0.1:6001 peers set([])
+
+Ex 3: Add and retrieve a number of key/value pairs using telnet
+
+In the following, lower case is commands you enter, upper case
+is answers from the server.
+
+$ telnet 127.0.0.1 6000
+Trying 127.0.0.1...
+Connected to localhost.
+Escape character is '^]'.
+set 1 0 0 3
+123
+STORED
+set 2 0 0 3
+234
+STORED
+set 3 0 0 3
+345
+STORED
+set 4 0 0 3
+456
+STORED
+get 1 2 3 4
+VALUE 1 0 3
+123
+VALUE 2 0 3
+234
+VALUE 3 0 3
+345
+VALUE 4 0 3
+456
+END
+
+Ex 4: Add and retrieve a number of key/value pairs using pylibmc
+
+$ python
+Python 2.7.1 (r271:86832, Jan 14 2011, 23:35:53) 
+[GCC 4.2.1 (Apple Inc. build 5664)] on darwin
+Type "help", "copyright", "credits" or "license" for more information.
+>>> import pylibmc
+>>> mc = pylibmc.Client(['127.0.0.1:6001'])
+>>> mc.set('5', '567')
+True
+>>> mc.set('6', '678')
+True
+>>> mc.get('1')
+'123'
+>>> mc.get('5')
+'567'
+
+Ex 5: Add a third node
+
+$ python pycache.py --addr 127.0.0.1:6002 --peer 127.0.0.1:6001
+INFO:root:Starting server @ 127.0.0.1:6002
+INFO:root:Server ID 1354135248111670504095873253778595688730524259160 @ 127.0.0.1:6002 peers set([])
+INFO:root:New connection from 127.0.0.1:51580
+INFO:root:set 3 0 0 3
+INFO:root:client disconnected
+INFO:root:New connection from 127.0.0.1:51581
+INFO:root:set 2 0 0 3
+INFO:root:client disconnected
+INFO:root:New connection from 127.0.0.1:51582
+INFO:root:set 6 0 0 3
+INFO:root:client disconnected
+
+Ex 6: Retrieve the values using telnet
+
+get 1 2 3 4 5 6
+VALUE 1 0 3
+123
+VALUE 2 0 3
+234
+VALUE 3 0 3
+345
+VALUE 4 0 3
+456
+VALUE 5 0 3
+567
+VALUE 6 0 3
+678
+END
+
+Ex 7: Remove the second node
+
+Hit Ctrl-C in the terminal where the second node is running:
+
+^CINFO:root:Leaving mesh...
+INFO:root:Sending leave to 127.0.0.1:6002
+INFO:root:Sending leave to 127.0.0.1:6000
+INFO:root:Handing over 1:(0, 0, '123') to 127.0.0.1:6000
+INFO:root:Handing over 5:(0, 0, '567') to 127.0.0.1:6000
+
+Ex 8: Retrieve the values
+
+get 1 2 3 4 5 6
+VALUE 1 0 3
+123
+VALUE 2 0 3
+234
+VALUE 3 0 3
+345
+VALUE 4 0 3
+456
+VALUE 5 0 3
+567
+VALUE 6 0 3
+678
+END
+
+
+Implementation notes
+==============================================================================
+
+In general, the implementation favor clarity and correctness over
+speed and efficiency.
+
+The implementation of Pycache is loosely based on some of the ideas
+from Kademlia [1]. Keys in Pycache are calculated as 160-bit SHA1
+hashes. The node IDs are calculated as the SHA1 hash of the address
+string (e.g. '127.0.0.1:6000') of a node, and the distance between two
+keys are calculated as the XOR between the two keys.
+
+Contrary to Kademlia, in Pycache all the nodes needs to know about all
+the other nodes in the mesh. This is purely to simplify the
+implementation and is not viewed as an optimal implementation. It
+makes the implementation simple in two ways, (1) every node only needs
+to keep one list of information about all its peers (there is no need
+for a k-bucket structure), and (2) all updates and lookups can be made
+in at most two hops (either a client has connected to the node that
+handles the key it wishes to access, or that node can calculate which
+node should handle the key and contact it).
+
+Pycache uses the memcached protocol both for client access and for
+communication between nodes. A client does not need to know that it is
+talking to a mesh, it can connect to any of the nodes and perform all
+its actions through that connection. The protocol used between the
+nodes have extensions to handle that nodes can join and leave the
+mesh. The Pycache implementation thus essentially consist of a
+memcached server and client, wrapped around a local hash table. The
+local hash table is a regular Python dictionary object, and does not
+support persisting key/values pairs to disk. Pycache can easily be
+extended to use any object that support the Python dictionary
+interface for storage of key/value pairs.
+
+Pycache does not support any form of redundancy. If a node fails, the
+key/value pairs in that node will be lost. A full Kademlia
+implementation would allow for redundancy, as a key/value pair can be
+stored in multiple nodes. Pycache could be extended to support this as
+well.
+
+There is no global locking or synchronization in Pycache, which means
+that when a node joins or leaves the mesh, there will be a brief time
+where the nodes may have an inconsitent view of the mesh. For example,
+when a new node joins, during a brief period of time, some of the
+nodes will know about the new node, and some of the nodes will not yet
+have that information. The rebalancing scheme will eventually make
+sure that all the nodes have a conistent view.
+
+Updates to the local cache are not atomic, and thus the implementation
+is not thread safe. The current implementation is based on gevent,
+which in turn is based on libevent, and thus essentially
+single-threaded.
+
+Memcached can run over TCP and optionally over UDP; Pycache only
+supports TCP. For simplicity, we do not cache connections.
+
+We do not handle the data part of the various set and update commands
+correctly. According to the memcached protocol, the data should be
+viewed as an opaque byte string, terminated by '\r\n', and of size
+'bytes' (as given in the command). We simply read the data as a
+regular string terminated by '\r\n', and then check that the size
+match the 'bytes' argument. A string CONTAINING a '\r\n' will thus
+be handled incorrectly (it will be views as a client error). The
+reason, again, is one of simplifying the implementation.
+
+Pycache does not currently support a daemon mode.
+
+
+Protocol
+==============================================================================
+
+In this section we describe the overlay protocol implemented by
+Pycache. The protocol is a superset of the memcached protocol, with
+extensions for handling nodes joining and leaving the mesh.
+
+We do not yet support the full memcached protocol; the limitations are
+noted below.
+
+A description of the memcached protocol can be found in [2]. We
+summarize the protocol here for ease of access. We use the same syntax
+as [2] when describing the protocol.
+
+NOTE: All protocol requests and replies are terminated with
+'\r\n'. The original protocol description [2] writes them out
+everywhere; we have chosen not too, as it looks ugly.
+
+------------------------------------------------------------------------------
+set                                                                  supported 
+
+Syntax: set <key> <flags> <exptime> <bytes> [noreply]
+
+Store a key/value pair, overwriting any existing value stored for the
+given the key. After the command line follows a data block of size
+<bytes>, terminated with '\r\n'. The call returns either STORED or
+NOT_STORED.
+
+NOTE: We do not handle the data size correctly. We simply read data
+until we find a '\r\n' and do not care about the 'btyes'
+attribute. This is done to simplify the implementation.
+
+------------------------------------------------------------------------------
+add                                                                  supported 
+
+Syntax: add <key> <flags> <exptime> <bytes> [noreply]
+
+Store a key/value pair only if the key does not yet exist in the
+table. After the command line follows a data block of size <bytes>,
+terminated with '\r\n'. The command returns either STORED or
+NOT_STORED
+
+NOTE: We do not handle the data size correctly. We simply read data
+until we find a '\r\n' and do not care about the 'btyes'
+attribute. This is done to simplify the implementation.
+
+------------------------------------------------------------------------------
+replace                                                              supported
+
+Syntax: replace <key> <flags> <exptime> <bytes> [noreply]
+
+Store a key/value pair only if the key does already exist in the
+table. After the command line follows a data block of size <bytes>,
+terminated with '\r\n'. The command returns either STORED or
+NOT_STORED
+
+NOTE: We do not handle the data size correctly. We simply read data
+until we find a '\r\n' and do not care about the size attribute. This
+is done to simplify the implementation.
+
+------------------------------------------------------------------------------
+append                                                               supported
+
+Syntax: append <key> <flags> <exptime> <bytes> [noreply]
+
+Append the value to an existing key after the existing value. After
+the command line follows a data block of size <bytes>, terminated with
+'\r\n'. The command returns either STORED or NOT_STORED
+
+NOTE: We do not handle the data size correctly. We simply read data
+until we find a '\r\n' and do not care about the size attribute. This
+is done to simplify the implementation.
+
+
+------------------------------------------------------------------------------
+prepend                                                              supported
+
+Syntax: prepend <key> <flags> <exptime> <bytes> [noreply]
+
+Prepend the value to an existing key before the existing value. After
+the command line follows a data block of size <bytes>, terminated with
+'\r\n'. The command returns either STORED or NOT_STORED
+
+NOTE: We do not handle the data size correctly. We simply read data
+until we find a '\r\n' and do not care about the size attribute. This
+is done to simplify the implementation.
+
+------------------------------------------------------------------------------
+cas                                                              not supported
+
+Syntax: cas <key> <flags> <exptime> <bytes> <cas unique> [noreply]
+
+Check-and-set, i.e. store data, but only if it has not been changed
+since I last read it. Returns STORED, EXISTS, or NOT_FOUND.
+
+------------------------------------------------------------------------------
+get                                                                  supported
+
+Syntax: get <key>*
+
+Retrieve one or more values. Each returned value will occupy two lines:
+
+VALUE <key> <flags> <bytes>
+<data block>
+
+The sequence will be terminated by an END.
+
+------------------------------------------------------------------------------
+gets                                                             not supported
+
+Syntax: gets <key>*
+
+Retrieve one or more values, including a cas unique value. Each returned
+value will occupy two lines:
+
+VALUE <key> <flags> <bytes> <cas unique>
+<data block>
+
+The sequence will be terminated by an END.
+
+------------------------------------------------------------------------------
+delete                                                               supported
+
+Syntax: delete <key> [noreply]
+
+Delete a key/value pair. Returns either DELETED or NOT_FOUND.
+
+------------------------------------------------------------------------------
+incr                                                                 supported
+
+Syntax: incr <key> <value> [noreply]
+
+Increment the value stored under key with the amount given as value. Returns
+either the incremented value or NOT_FOUND.
+
+------------------------------------------------------------------------------
+decr                                                                 supported
+
+Syntax: decr <key> <value> [noreply]
+
+Decrement the value stored under key with the amount given as value. Retunrs
+either the decremented value or NOT_FOUND.
+
+------------------------------------------------------------------------------
+stats                                                            not supported
+
+Syntax: stats
+        stats <args>
+
+There are a large number of stats that can be retrieved. Please see the
+memcached protocol description [2] for details.
+
+------------------------------------------------------------------------------
+flush_all                                                        not supported
+
+Synaxt: flush_all [exptime] [noreply]
+
+Invalidate all existing keys. If exptime is given, invalidate all keys after
+exptime has passed.
+
+------------------------------------------------------------------------------
+version                                                              supported
+
+Syntax: version
+
+Return version information about the server.
+
+------------------------------------------------------------------------------
+verbosity                                                        not supported
+
+Syntax: verbosity <level> [noreply]
+
+Set the verbosity level of the server logging.
+
+------------------------------------------------------------------------------
+quit                                                                 supported
+
+Syntax: quit
+
+Close the connection.
+
+------------------------------------------------------------------------------
+peers                                                     extension, supported
+
+Syntax: peers
+
+Return the list of addresses to peers, including the address of the
+node itself. Addresses are given on the form <ip-addr>:<port> and are
+separated by whitespace.
+
+------------------------------------------------------------------------------
+join                                                      extension, supported
+
+Syntax: join <addr>
+
+Add a new node address to the set of peers. The addr parameter is
+given on the form <ip-addr>:<port>.
+
+------------------------------------------------------------------------------
+leave                                                     extension, supported
+
+Syntax: leave <addr>
+
+Remove a node address from the set of peers. The addr parameter is
+given on the form <ip-addr>:<port>.
+
+------------------------------------------------------------------------------
+dump                                                      extension, supported
+
+Syntax: dump
+
+Dump all key/value pairs to the log and the console. Only supported in
+debug mode.
+
+
+References
+==============================================================================
+
+[1] http://en.wikipedia.org/wiki/Kademlia
+[2] https://github.com/memcached/memcached/blob/master/doc/protocol.txt
