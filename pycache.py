@@ -1,4 +1,4 @@
-# Copyright (c) 2011 Johan Liseborn <johan@liseborn.se>
+# Copyright (c) 2011-2016 Johan Liseborn <johan@liseborn.se>
 #
 # Permission to use, copy, modify, and distribute this software for any
 # purpose with or without fee is hereby granted, provided that the above
