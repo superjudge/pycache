@@ -239,7 +239,7 @@ viewed as an opaque byte string, terminated by '\r\n', and of size
 'bytes' (as given in the command). We simply read the data as a
 regular string terminated by '\r\n', and then check that the size
 match the 'bytes' argument. A string CONTAINING a '\r\n' will thus
-be handled incorrectly (it will be views as a client error). The
+be handled incorrectly (it will be viewed as a client error). The
 reason, again, is one of simplifying the implementation.
 
 Pycache does not currently support a daemon mode.
@@ -317,7 +317,6 @@ the command line follows a data block of size <bytes>, terminated with
 NOTE: We do not handle the data size correctly. We simply read data
 until we find a '\r\n' and do not care about the size attribute. This
 is done to simplify the implementation.
-
 
 ------------------------------------------------------------------------------
 prepend                                                              supported
