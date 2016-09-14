@@ -1058,7 +1058,7 @@ class CacheServer(object):
 
     """
     if not self.peers:
-      logging.info('I am the last one, my knowledge will be forever lost.')
+      logging.info('I am the last of my kind, my knowledge will be forever lost.')
       return
 
     for peer in self.peers:
