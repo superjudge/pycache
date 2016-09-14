@@ -36,12 +36,12 @@ VERSION = '0.1.0'
 # 160-bit SHA1 hash for consistent key hashing, and we use XOR to
 # calculate the distance between two keys. We calculate the ID of each
 # node (called a k-id or kid, for Kademlia ID) as the SHA1 hash of the
-# nodes address string on the form '192.0.2.13:6000'; as we incude
+# nodes address string on the form '192.0.2.13:6000'; as we include
 # both the IP address and the port, it is possible to run multiple
 # instances on the same physical or virtual server.
 #
 # The module uses gevent for lightweight threads and network
-# communicaiton.
+# communication.
 #
 # The main classes and functions defined in this modue are:
 #
