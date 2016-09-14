@@ -16,6 +16,9 @@ memcached protocol. It is thus also possible to issue commands using
 e.g. a telnet connection. There are some limitations in the memcached
 protocol support, which are described later in this document.
 
+NOTE: pycache is an experiment and a toy. It is not suitable for
+production use.
+
 
 Using Pycache
 ==============================================================================
@@ -60,35 +63,42 @@ INFO:root:Server ID 1028608665736931134879629470243750787007437450801 @ 127.0.0.
 
 Ex 3: Add and retrieve a number of key/value pairs using telnet
 
-In the following, lower case is commands you enter, upper case
+In the following, things you are supposed to enter are prefixed with
+'-> ', and things that will be returned from the server are prefixed
+with '<- '. You are not supposed to actually enter '-> ' before the
+command, and you will not actually see a '<- ' before the server
+response. These are only there so that you will know what to write and
+what to expect in return.
+
+lower case is commands you enter, upper case
 is answers from the server.
 
 $ telnet 127.0.0.1 6000
 Trying 127.0.0.1...
 Connected to localhost.
 Escape character is '^]'.
-set 1 0 0 3
-123
-STORED
-set 2 0 0 3
-234
-STORED
-set 3 0 0 3
-345
-STORED
-set 4 0 0 3
-456
-STORED
-get 1 2 3 4
-VALUE 1 0 3
-123
-VALUE 2 0 3
-234
-VALUE 3 0 3
-345
-VALUE 4 0 3
-456
-END
+-> set 1 0 0 3
+-> 123
+<- STORED
+-> set 2 0 0 3
+-> 234
+<- STORED
+-> set 3 0 0 3
+-> 345
+<- STORED
+-> set 4 0 0 3
+-> 456
+<- STORED
+-> get 1 2 3 4
+<- VALUE 1 0 3
+<- 123
+<- VALUE 2 0 3
+<- 234
+<- VALUE 3 0 3
+<- 345
+<- VALUE 4 0 3
+<- 456
+<- END
 
 Ex 4: Add and retrieve a number of key/value pairs using pylibmc
 
