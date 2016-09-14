@@ -1,12 +1,13 @@
 
 Pycache is a simple implementation of a distributed hash table. The
 main purpose of the implementation is experimentation with DHT
-principles.
+principles. The DHT is loosely based on Kademlia.
 
-Pycache is implemented in pure Python. It depends on gevent, which
-in turn depends on greenlet. Pycache has been developed and tested
-using Python 2.7.1, gevent 0.13.6, and greenlet 0.3.1 on
-Mac OS X 10.6.7.
+Pycache is implemented in pure Python. It depends on gevent, which in
+turn depends on greenlet. Pycache has been developed and tested using
+Python 2.7.1, gevent 0.13.6, and greenlet 0.3.1 on Mac OS X 10.6.7,
+and using Python 2.7.12, gevent 1.1.2, and greenlet 0.3.10 on Ubuntu
+Linux 16.04 64bit.
 
 Pycache implements the the memcached protocol; it has been tested
 using pylibmc 1.1.1, but it should be usable with any memcached
