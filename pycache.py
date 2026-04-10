@@ -318,60 +318,61 @@ class RemoteMemcachedClient(object):
     """
     host, port = split_addr(addr)
     self.socket = create_connection((host, port))
-    self.fd = self.socket.makefile()
+    self.rfd = self.socket.makefile('r')
+    self.wfd = self.socket.makefile('w')
 
   def _set_type(self, cmd, key, flags, exptime, data, noreply):
     """Send a set-type command over TCP."""
-    self.fd.write(RemoteMemcachedClient.SET_TYPE.format(cmd=cmd,
-                                                        key=key,
-                                                        flags=flags,
-                                                        exptime=exptime,
-                                                        bytes=len(data),
-                                                        noreply=nr(noreply)))
-    self.fd.write('{}\r\n'.format(data))
-    self.fd.flush()
+    self.wfd.write(RemoteMemcachedClient.SET_TYPE.format(cmd=cmd,
+                                                         key=key,
+                                                         flags=flags,
+                                                         exptime=exptime,
+                                                         bytes=len(data),
+                                                         noreply=nr(noreply)))
+    self.wfd.write('{}\r\n'.format(data))
+    self.wfd.flush()
 
     if not noreply:
-      return self.fd.readline()
+      return self.rfd.readline()
 
   def _incr_type(self, cmd, key, value, noreply):
     """Send an incr-type command over TCP."""
-    self.fd.write(RemoteMemcachedClient.INCR_TYPE.format(cmd=cmd,
-                                                         key=key,
-                                                         value=value,
-                                                         noreply=nr(noreply)))
-    self.fd.flush()
+    self.wfd.write(RemoteMemcachedClient.INCR_TYPE.format(cmd=cmd,
+                                                          key=key,
+                                                          value=value,
+                                                          noreply=nr(noreply)))
+    self.wfd.flush()
 
     if not noreply:
-      return self.fd.readline()
+      return self.rfd.readline()
 
   def _join_type(self, cmd, addr, noreply):
     """Send a join-type command over TCP."""
-    self.fd.write(RemoteMemcachedClient.JOIN_TYPE.format(cmd=cmd,
-                                                         addr=addr,
-                                                         noreply=nr(noreply)))
-    self.fd.flush()
+    self.wfd.write(RemoteMemcachedClient.JOIN_TYPE.format(cmd=cmd,
+                                                          addr=addr,
+                                                          noreply=nr(noreply)))
+    self.wfd.flush()
 
     if not noreply:
-      return self.fd.readline()
+      return self.rfd.readline()
 
   def _delete_type(self, cmd, key, noreply):
     """Send a delete-type command over TCP."""
-    self.fd.write(RemoteMemcachedClient.DELETE_TYPE.format(cmd=cmd,
-                                                           key=key,
-                                                           noreply=nr(noreply)))
-    self.fd.flush()
+    self.wfd.write(RemoteMemcachedClient.DELETE_TYPE.format(cmd=cmd,
+                                                            key=key,
+                                                            noreply=nr(noreply)))
+    self.wfd.flush()
 
     if not noreply:
-      return self.fd.readline()
+      return self.rfd.readline()
 
   def _get_type(self, cmd, key):
     """Send a get-type command over TCP."""
-    self.fd.write(RemoteMemcachedClient.GET_TYPE.format(cmd=cmd, key=key))
-    self.fd.flush()
+    self.wfd.write(RemoteMemcachedClient.GET_TYPE.format(cmd=cmd, key=key))
+    self.wfd.flush()
 
     # Read the first line of the response...
-    line = self.fd.readline().strip()
+    line = self.rfd.readline().strip()
 
     if line == 'END':
       return None
@@ -386,10 +387,10 @@ class RemoteMemcachedClient(object):
     # XXX: (mjl 2011-05-16) We chomp of the string to be 'bytes'
     #      bytes long (this should amount to chomping of the '\r\n'
     #      at the end of the string, but we do not actually check that).
-    data = self.fd.readline()[:int(bytes)]
+    data = self.rfd.readline()[:int(bytes)]
 
     # Read the 'END\r\n'...
-    line = self.fd.readline().strip()
+    line = self.rfd.readline().strip()
 
     if line != 'END':
       raise SyntaxError(line)
@@ -398,9 +399,9 @@ class RemoteMemcachedClient(object):
 
   def _peers_type(self, cmd):
     """Send a peers-type command."""
-    self.fd.write(RemoteMemcachedClient.PEERS_TYPE.format(cmd=cmd))
-    self.fd.flush()
-    return self.fd.readline()
+    self.wfd.write(RemoteMemcachedClient.PEERS_TYPE.format(cmd=cmd))
+    self.wfd.flush()
+    return self.rfd.readline()
 
   def set(self, key, flags, exptime, value, noreply=False):
     """Send a memcached set command."""
@@ -440,7 +441,7 @@ class RemoteMemcachedClient(object):
 
   def quit(self):
     """Send a memcached quit command."""
-    self.fd.write('quit\r\n')
+    self.wfd.write('quit\r\n')
     self.socket.close()
 
   def peers(self):
@@ -493,7 +494,8 @@ class CacheHandler(object):
 
     """
     self.socket = socket
-    self.rfile = self.wfile = self.socket.makefile()
+    self.rfile = self.socket.makefile('r')
+    self.wfile = self.socket.makefile('w')
     self.server = server
 
   def handle(self):
@@ -561,7 +563,7 @@ class CacheHandler(object):
     """
     self.server.peers.add(addr)
 
-    for key, value in self.server.cache.items():
+    for key, value in list(self.server.cache.items()):
       addr = closest(self.server.peers.union([self.server.addr]), key)
 
       if addr != self.server.addr:
