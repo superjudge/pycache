@@ -4,10 +4,8 @@ main purpose of the implementation is experimentation with DHT
 principles. The DHT is loosely based on Kademlia.
 
 Pycache is implemented in pure Python. It depends on gevent, which in
-turn depends on greenlet. Pycache has been developed and tested using
-Python 2.7.1, gevent 0.13.6, and greenlet 0.3.1 on Mac OS X 10.6.7,
-and using Python 2.7.12, gevent 1.1.2, and greenlet 0.3.10 on Ubuntu
-Linux 16.04 64bit.
+turn depends on greenlet. Pycache requires Python 3.12 or later and
+has been tested using Python 3.12, gevent 26.x, and greenlet 3.x.
 
 Pycache implements the the memcached protocol; it has been tested
 using pylibmc 1.1.1, but it should be usable with any memcached
