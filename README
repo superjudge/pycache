@@ -7,6 +7,10 @@ Pycache is implemented in pure Python. It depends on gevent, which in
 turn depends on greenlet. Pycache requires Python 3.12 or later and
 has been tested using Python 3.12, gevent 26.x, and greenlet 3.x.
 
+Dependencies are managed with uv. Install uv if you don't have it,
+then run 'uv sync' to set up the virtual environment before running
+any commands.
+
 Pycache implements the the memcached protocol; it has been tested
 using pylibmc 1.1.1, but it should be usable with any memcached
 client. Pycache only implements the text-based version of the
@@ -21,9 +25,13 @@ production use.
 Using Pycache
 ==============================================================================
 
+First, set up the virtual environment:
+
+$ uv sync
+
 Start a Pycache node like this:
 
-$ python pycache.py --addr 127.0.0.1:6000
+$ uv run python pycache.py --addr 127.0.0.1:6000
 
 The -addr parameter tells Pycache which address to listen to. Note
 that at the momemnt you can not use an address like '0.0.0.0:6000' to
@@ -32,7 +40,7 @@ but it will not work in later stages, when you add additional peers.
 
 To start a second instance, you need to tell it about one peers.
 
-$ python pycache.py --addr 127.0.0.1:6001 --peer 127.0.0.1:6000
+$ uv run python pycache.py --addr 127.0.0.1:6001 --peer 127.0.0.1:6000
 
 This will start a second instance, which will contact the first
 instance and join the mesh.
@@ -49,13 +57,13 @@ support a daemon mode.
 
 Ex 1: Start the first node
 
-$ python pycache.py --addr 127.0.0.1:6000
+$ uv run python pycache.py --addr 127.0.0.1:6000
 INFO:root:Starting server @ 127.0.0.1:6000
 INFO:root:Server ID 793023952729318858436183708676502847422008045537 @ 127.0.0.1:6000 peers set([])
 
 Ex 2: Start the second node
 
-$ python pycache.py --addr 127.0.0.1:6001
+$ uv run python pycache.py --addr 127.0.0.1:6001
 INFO:root:Starting server @ 127.0.0.1:6001
 INFO:root:Server ID 1028608665736931134879629470243750787007437450801 @ 127.0.0.1:6001 peers set([])
 
@@ -100,10 +108,7 @@ Escape character is '^]'.
 
 Ex 4: Add and retrieve a number of key/value pairs using pylibmc
 
-$ python
-Python 2.7.1 (r271:86832, Jan 14 2011, 23:35:53) 
-[GCC 4.2.1 (Apple Inc. build 5664)] on darwin
-Type "help", "copyright", "credits" or "license" for more information.
+$ uv run python
 >>> import pylibmc
 >>> mc = pylibmc.Client(['127.0.0.1:6001'])
 >>> mc.set('5', '567')
@@ -117,7 +122,7 @@ True
 
 Ex 5: Add a third node
 
-$ python pycache.py --addr 127.0.0.1:6002 --peer 127.0.0.1:6001
+$ uv run python pycache.py --addr 127.0.0.1:6002 --peer 127.0.0.1:6001
 INFO:root:Starting server @ 127.0.0.1:6002
 INFO:root:Server ID 1354135248111670504095873253778595688730524259160 @ 127.0.0.1:6002 peers set([])
 INFO:root:New connection from 127.0.0.1:51580
