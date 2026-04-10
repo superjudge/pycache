@@ -74,7 +74,7 @@ VERSION = '0.1.0'
 # is closest to a given key.
 
 
-# The expiration time of a key/value in memcached# is specified either
+# The expiration time of a key/value in memcached is specified either
 # in Unix time (number of seconds since January 1, 1970), or as the
 # number of seconds starting from the current time. In the latter
 # case, the number may not exceed the following magic constant, which
@@ -141,21 +141,21 @@ class LocalMemcachedClient(object):
 
   def add(self, key, flags, exptime, value, noreply=False):
     """Set a key/value pair, if key does not already exist."""
-    if self.cache.has_key(key):
+    if key in self.cache:
       return self.NOT_STORED
     else:
       return self.set(key, flags, exptime, value)
 
   def replace(self, key, flags, exptime, value, noreply=False):
     """Set a key/value pair, but only if key already exist."""
-    if not self.cache.has_key(key):
+    if key not in self.cache:
       return self.NOT_STORED
     else:
       return self.set(key, flags, exptime, value)
 
   def append(self, key, value, noreply=False):
     """Append to value, if key/value pair exist."""
-    if not self.cache.has_key(key):
+    if key not in self.cache:
       return self.NOT_STORED
     else:
       flags, exptime, old_value = self.cache[key]
@@ -163,7 +163,7 @@ class LocalMemcachedClient(object):
 
   def prepend(self, key, value, noreply=False):
     """Prepend to value, if key/value pair exist."""
-    if not self.cache.has_key(key):
+    if key not in self.cache:
       return self.NOT_STORED
     else:
       flags, exptime, old_value = self.cache[key]
@@ -192,10 +192,10 @@ class LocalMemcachedClient(object):
     incremented.
 
     """
-    if self.cache.has_key(key):
+    if key in self.cache:
       flags, exptime, data = self.cache[key]
 
-      if 0 == exptime or current_time() <= exptime:
+      if 0 == exptime or current_time() < exptime:
         try:
           data = int(data)
         except ValueError:
@@ -236,10 +236,10 @@ class LocalMemcachedClient(object):
     incremented.
 
     """
-    if self.cache.has_key(key):
+    if key in self.cache:
       flags, exptime, data = self.cache[key]
 
-      if 0 == exptime or current_time() <= exptime:
+      if 0 == exptime or current_time() < exptime:
         try:
           data = int(data)
         except ValueError:
@@ -258,10 +258,10 @@ class LocalMemcachedClient(object):
 
   def get(self, key):
     """Get value for a key."""
-    if self.cache.has_key(key):
+    if key in self.cache:
       flags, exptime, data = self.cache[key]
 
-      if 0 == exptime or current_time() <= exptime:
+      if 0 == exptime or current_time() < exptime:
         return (key, flags, data)
       else:
         del self.cache[key]
@@ -271,7 +271,7 @@ class LocalMemcachedClient(object):
 
   def delete(self, key):
     """Delete a key/value pair."""
-    if self.cache.has_key(key):
+    if key in self.cache:
       del self.cache[key]
       return self.DELETED
     else:
@@ -408,7 +408,7 @@ class RemoteMemcachedClient(object):
 
   def add(self, key, flags, exptime, value, noreply=False):
     """Send a memcached add command."""
-    return self._set_type('add', flags, exptime, value, noreply)
+    return self._set_type('add', key, flags, exptime, value, noreply)
 
   def replace(self, key, flags, exptime, value, noreply=False):
     """Send a memcached replace command."""
@@ -420,7 +420,7 @@ class RemoteMemcachedClient(object):
 
   def prepend(self, key, flags, exptime, value, noreply=False):
     """Send a memcached prepend command."""
-    return self._set_type('prepend', key, flags, exptime, data, noreply)
+    return self._set_type('prepend', key, flags, exptime, value, noreply)
 
   def incr(self, key, value, noreply=False):
     """Send a memcached incr command."""
@@ -428,7 +428,7 @@ class RemoteMemcachedClient(object):
 
   def decr(self, key, value, noreply=False):
     """Send a memcached decr command."""
-    return self._decr_type('decr', key, value, noreply)
+    return self._incr_type('decr', key, value, noreply)
 
   def get(self, key):
     """Send a memcached get command."""
@@ -529,7 +529,7 @@ class CacheHandler(object):
         func = getattr(self, 'do_' + args[0])
         parse_args_func = getattr(self, '_parse_' + args[0] + '_args')
         func(**parse_args_func(args[1:]))
-      except SyntaxError, e:
+      except SyntaxError as e:
         self.wfile.write('CLIENT_ERROR {0}\r\n'.format(e))
       except AttributeError:
         self.wfile.write('ERROR\r\n')
@@ -716,7 +716,7 @@ class CacheHandler(object):
     data = self.rfile.readline().strip('\r\n')
 
     if length != len(data):
-      self.rfile.write('CLIENT_ERROR data does not match size\r\n')
+      self.wfile.write('CLIENT_ERROR data does not match size\r\n')
       return
 
     addr = closest(self.server.peers.union([self.server.addr]), key)
@@ -928,7 +928,7 @@ class CacheHandler(object):
 
   def do_version(self):
     """Return the version of the server."""
-    self.file.write('VERSION {0} ({1})'.format(VERSION, self.kid))
+    self.wfile.write('VERSION {0} ({1})\r\n'.format(VERSION, self.server.kid))
 
   def do_verbosity(self, level, noreply):
     """Set the logging verbosity level."""
@@ -973,7 +973,7 @@ class CacheHandler(object):
     else:
       res = 'NOT_FOUND\r\n'
 
-    logging.info('Server ID {0} peers {1}'.format(self.kid, self.peers))
+    logging.info('Server ID {0} peers {1}'.format(self.server.kid, self.server.peers))
 
     if not noreply:
       self.wfile.write(res)
@@ -1097,7 +1097,7 @@ def current_time():
 # ----------------------------------------------------------------------------
 def hash(val):
   """Calculate the SHA1 hash of a value."""
-  return int(hashlib.sha1(val).hexdigest(), 16)
+  return int(hashlib.sha1(val.encode()).hexdigest(), 16)
 
 
 # ----------------------------------------------------------------------------
@@ -1117,7 +1117,8 @@ def closest(peers, key):
 
   """
   if peers:
-    dists = [(distance(hash(key), hash(x)), x) for x in peers]
+    key_hash = hash(key)
+    dists = [(distance(key_hash, hash(x)), x) for x in peers]
     _, addr = min(dists)
     return addr
   else:
