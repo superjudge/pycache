@@ -42,8 +42,7 @@ def _get_version() -> str:
   return 'unknown'
 
 
-VERSION = _get_version()
-__version__ = VERSION
+__version__ = _get_version()
 
 
 # This module contains an implementation of a DHT supporting a subset
@@ -1045,7 +1044,7 @@ class CacheHandler(object):
 
   async def do_version(self):
     """Return the version of the server."""
-    self.wfile.write('VERSION {0} ({1})\r\n'.format(VERSION, self.server.kid).encode('utf-8'))
+    self.wfile.write('VERSION {0} ({1})\r\n'.format(__version__, self.server.kid).encode('utf-8'))
     await self.wfile.drain()
 
   async def do_verbosity(self, level, noreply):
@@ -1279,7 +1278,7 @@ async def main(args=None):
                       help='The address of one peer, e.g. 192.0.2.13:6001')
   parser.add_argument('--version',
                       action='version',
-                      version='%(prog)s {}'.format(VERSION),
+                      version='%(prog)s {}'.format(__version__),
                       help='Show version number')
   parser.add_argument('--debug',
                       action='store_true',

@@ -49,9 +49,9 @@ class HelperTestCase(unittest.TestCase):
     self.assertEqual(pycache.nr(False), '')
 
   def test_dynamic_version(self):
-    self.assertNotEqual(pycache.VERSION, 'unknown')
-    self.assertEqual(pycache.VERSION, pycache.__version__)
-    self.assertEqual(pycache.VERSION, '0.2.0')
+    self.assertNotEqual(pycache.__version__, 'unknown')
+    self.assertEqual(pycache.__version__, '0.2.0')
+    self.assertFalse(hasattr(pycache, 'VERSION'))
 
 
 class CacheTestCase(unittest.TestCase):
@@ -297,7 +297,7 @@ class ProtocolTestCase(unittest.IsolatedAsyncioTestCase):
       writer.write(b'version\r\n')
       await writer.drain()
       line = await reader.readline()
-      self.assertTrue(line.startswith('VERSION {0}'.format(pycache.VERSION).encode('utf-8')))
+      self.assertTrue(line.startswith('VERSION {0}'.format(pycache.__version__).encode('utf-8')))
     finally:
       writer.close()
       await writer.wait_closed()
