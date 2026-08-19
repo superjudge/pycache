@@ -18,7 +18,7 @@ import logging
 import time
 
 
-VERSION = '0.1.0'
+VERSION = '0.2.0'
 
 
 # This module contains an implementation of a DHT supporting a subset

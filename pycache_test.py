@@ -292,7 +292,7 @@ class ProtocolTestCase(unittest.IsolatedAsyncioTestCase):
       writer.write(b'version\r\n')
       await writer.drain()
       line = await reader.readline()
-      self.assertTrue(line.startswith(b'VERSION 0.1.0'))
+      self.assertTrue(line.startswith('VERSION {0}'.format(pycache.VERSION).encode('utf-8')))
     finally:
       writer.close()
       await writer.wait_closed()
