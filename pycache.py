@@ -12,13 +12,10 @@
 # ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
+import asyncio
 import hashlib
 import logging
 import time
-
-from gevent import Greenlet
-from gevent.server import StreamServer
-from gevent.socket import create_connection
 
 
 VERSION = '0.1.0'
@@ -36,27 +33,25 @@ VERSION = '0.1.0'
 # 160-bit SHA1 hash for consistent key hashing, and we use XOR to
 # calculate the distance between two keys. We calculate the ID of each
 # node (called a k-id or kid, for Kademlia ID) as the SHA1 hash of the
-# nodes address string on the form '192.0.2.13:6000'; as we include
+# node's address string on the form '192.0.2.13:6000'; as we include
 # both the IP address and the port, it is possible to run multiple
 # instances on the same physical or virtual server.
 #
-# The module uses gevent for lightweight threads and network
-# communication.
+# The module uses Python standard library asyncio for non-blocking
+# network communication and coroutines.
 #
-# The main classes and functions defined in this modue are:
+# The main classes and functions defined in this module are:
 #
 # LocalMemcachedClient   A wrapper around a Python dictionary,
 #                        offering a memcached-like interface
 #
-# RemoteMemcachedClient  A client supporting the TCP version
-#                        of the memcached protocol. Offer the
+# RemoteMemcachedClient  An async client supporting the TCP version
+#                        of the memcached protocol. Offers the
 #                        same interface as LocalMemcachedClient.
 #
-# CacheServer            A function object used together with
-#                        the gevent StreamServer to listen for
-#                        TCP connections. This class holds
-#                        data that is common to a node, e.g.
-#                        the local cache and the set of peers.
+# CacheServer            Manages the node state (local cache, peer set,
+#                        address, K-ID) and handles incoming connections
+#                        via asyncio.start_server.
 #
 # CacheHandler           Used together with CacheServer to
 #                        handle incoming connections. Each
@@ -65,12 +60,12 @@ VERSION = '0.1.0'
 #                        of the memcached protocol, as well as
 #                        the main parts of the actual DHT algorithm.
 #
-# JoinGreenlet           A greenlet that handles joining a new
+# join_mesh              An async coroutine that handles joining a new
 #                        node to an existing mesh.
 #
 # There is also a set of helper functions to calculate the hash
 # value of a string (i.e. the SHA1 hash of the string), the
-# distance between to keys, and which node in a set of nodes
+# distance between two keys, and which node in a set of nodes
 # is closest to a given key.
 
 
@@ -132,7 +127,7 @@ class LocalMemcachedClient(object):
     like (key, (flags, exptime, data)).
 
     """
-    return self.cache.items()
+    return list(self.cache.items())
 
   def set(self, key, flags, exptime, value, noreply=False):
     """Set a key/value pair."""
@@ -280,13 +275,13 @@ class LocalMemcachedClient(object):
 
 # ----------------------------------------------------------------------------
 def nr(n):
-  """Transform a booelan into a suitable 'noreply' string."""
+  """Transform a boolean into a suitable 'noreply' string."""
   return ' noreply' if n else ''
 
 
 # ----------------------------------------------------------------------------
 class RemoteMemcachedClient(object):
-  """A client for a subset of the memcached protocol.
+  """An async client for a subset of the memcached protocol.
 
   There are four basic set of commands, where all commands in a
   set share the same parameter format; commands in parenthesis are
@@ -309,152 +304,220 @@ class RemoteMemcachedClient(object):
   def __init__(self, addr):
     """Initialize a network based cache client.
 
-    addr :: String   A string on the <ip-addr>:<port>,
+    addr :: String   A string on the <ip-addr>:<port> form,
                      e.g. '192.0.2.13:6000'
 
-    Inititalization will create a TCP connection to the
-    given IP address and port.
-
     """
-    host, port = split_addr(addr)
-    self.socket = create_connection((host, port))
-    self.rfd = self.socket.makefile('r')
-    self.wfd = self.socket.makefile('w')
+    self.addr = addr
+    self.reader = None
+    self.writer = None
+    self._managed = False
 
-  def _set_type(self, cmd, key, flags, exptime, data, noreply):
+  async def connect(self):
+    """Establish connection to remote server if not already connected."""
+    if self.writer is None:
+      host, port = split_addr(self.addr)
+      self.reader, self.writer = await asyncio.open_connection(host, port)
+    return self
+
+  async def close(self):
+    """Close connection to remote server."""
+    if self.writer is not None:
+      self.writer.close()
+      try:
+        await self.writer.wait_closed()
+      except Exception:
+        pass
+      self.writer = None
+      self.reader = None
+
+  async def __aenter__(self):
+    self._managed = True
+    return await self.connect()
+
+  async def __aexit__(self, exc_type, exc_val, exc_tb):
+    self._managed = False
+    await self.close()
+
+  async def _set_type(self, cmd, key, flags, exptime, data, noreply):
     """Send a set-type command over TCP."""
-    self.wfd.write(RemoteMemcachedClient.SET_TYPE.format(cmd=cmd,
-                                                         key=key,
-                                                         flags=flags,
-                                                         exptime=exptime,
-                                                         bytes=len(data),
-                                                         noreply=nr(noreply)))
-    self.wfd.write('{}\r\n'.format(data))
-    self.wfd.flush()
-
-    if not noreply:
-      return self.rfd.readline()
-
-  def _incr_type(self, cmd, key, value, noreply):
-    """Send an incr-type command over TCP."""
-    self.wfd.write(RemoteMemcachedClient.INCR_TYPE.format(cmd=cmd,
-                                                          key=key,
-                                                          value=value,
-                                                          noreply=nr(noreply)))
-    self.wfd.flush()
-
-    if not noreply:
-      return self.rfd.readline()
-
-  def _join_type(self, cmd, addr, noreply):
-    """Send a join-type command over TCP."""
-    self.wfd.write(RemoteMemcachedClient.JOIN_TYPE.format(cmd=cmd,
-                                                          addr=addr,
-                                                          noreply=nr(noreply)))
-    self.wfd.flush()
-
-    if not noreply:
-      return self.rfd.readline()
-
-  def _delete_type(self, cmd, key, noreply):
-    """Send a delete-type command over TCP."""
-    self.wfd.write(RemoteMemcachedClient.DELETE_TYPE.format(cmd=cmd,
-                                                            key=key,
-                                                            noreply=nr(noreply)))
-    self.wfd.flush()
-
-    if not noreply:
-      return self.rfd.readline()
-
-  def _get_type(self, cmd, key):
-    """Send a get-type command over TCP."""
-    self.wfd.write(RemoteMemcachedClient.GET_TYPE.format(cmd=cmd, key=key))
-    self.wfd.flush()
-
-    # Read the first line of the response...
-    line = self.rfd.readline().strip()
-
-    if line == 'END':
-      return None
-
+    was_connected = self.writer is not None
+    await self.connect()
     try:
-      _, _, flags, bytes = line.split()
-    except ValueError:
-      raise SyntaxError(line)
+      self.writer.write(RemoteMemcachedClient.SET_TYPE.format(cmd=cmd,
+                                                              key=key,
+                                                              flags=flags,
+                                                              exptime=exptime,
+                                                              bytes=len(data),
+                                                              noreply=nr(noreply)).encode('utf-8'))
+      self.writer.write('{}\r\n'.format(data).encode('utf-8'))
+      await self.writer.drain()
 
-    # Read the second line of the response (should be the data).
-    #
-    # XXX: (mjl 2011-05-16) We chomp of the string to be 'bytes'
-    #      bytes long (this should amount to chomping of the '\r\n'
-    #      at the end of the string, but we do not actually check that).
-    data = self.rfd.readline()[:int(bytes)]
+      if not noreply:
+        res_bytes = await self.reader.readline()
+        return res_bytes.decode('utf-8')
+    finally:
+      if not was_connected and not self._managed:
+        await self.close()
 
-    # Read the 'END\r\n'...
-    line = self.rfd.readline().strip()
+  async def _incr_type(self, cmd, key, value, noreply):
+    """Send an incr-type command over TCP."""
+    was_connected = self.writer is not None
+    await self.connect()
+    try:
+      self.writer.write(RemoteMemcachedClient.INCR_TYPE.format(cmd=cmd,
+                                                               key=key,
+                                                               value=value,
+                                                               noreply=nr(noreply)).encode('utf-8'))
+      await self.writer.drain()
 
-    if line != 'END':
-      raise SyntaxError(line)
+      if not noreply:
+        res_bytes = await self.reader.readline()
+        return res_bytes.decode('utf-8')
+    finally:
+      if not was_connected and not self._managed:
+        await self.close()
 
-    return (key, flags, data)
+  async def _join_type(self, cmd, addr, noreply):
+    """Send a join-type command over TCP."""
+    was_connected = self.writer is not None
+    await self.connect()
+    try:
+      self.writer.write(RemoteMemcachedClient.JOIN_TYPE.format(cmd=cmd,
+                                                               addr=addr,
+                                                               noreply=nr(noreply)).encode('utf-8'))
+      await self.writer.drain()
 
-  def _peers_type(self, cmd):
+      if not noreply:
+        res_bytes = await self.reader.readline()
+        return res_bytes.decode('utf-8')
+    finally:
+      if not was_connected and not self._managed:
+        await self.close()
+
+  async def _delete_type(self, cmd, key, noreply):
+    """Send a delete-type command over TCP."""
+    was_connected = self.writer is not None
+    await self.connect()
+    try:
+      self.writer.write(RemoteMemcachedClient.DELETE_TYPE.format(cmd=cmd,
+                                                                 key=key,
+                                                                 noreply=nr(noreply)).encode('utf-8'))
+      await self.writer.drain()
+
+      if not noreply:
+        res_bytes = await self.reader.readline()
+        return res_bytes.decode('utf-8')
+    finally:
+      if not was_connected and not self._managed:
+        await self.close()
+
+  async def _get_type(self, cmd, key):
+    """Send a get-type command over TCP."""
+    was_connected = self.writer is not None
+    await self.connect()
+    try:
+      self.writer.write(RemoteMemcachedClient.GET_TYPE.format(cmd=cmd, key=key).encode('utf-8'))
+      await self.writer.drain()
+
+      # Read the first line of the response...
+      line_bytes = await self.reader.readline()
+      line = line_bytes.decode('utf-8').strip()
+
+      if line == 'END' or not line:
+        return None
+
+      try:
+        _, _, flags, length = line.split()
+      except ValueError:
+        raise SyntaxError(line)
+
+      # Read the second line of the response (should be the data).
+      data_bytes = await self.reader.readline()
+      data = data_bytes.decode('utf-8')[:int(length)]
+
+      # Read the 'END\r\n'...
+      end_bytes = await self.reader.readline()
+      end_line = end_bytes.decode('utf-8').strip()
+
+      if end_line != 'END':
+        raise SyntaxError(end_line)
+
+      return (key, int(flags), data)
+    finally:
+      if not was_connected and not self._managed:
+        await self.close()
+
+  async def _peers_type(self, cmd):
     """Send a peers-type command."""
-    self.wfd.write(RemoteMemcachedClient.PEERS_TYPE.format(cmd=cmd))
-    self.wfd.flush()
-    return self.rfd.readline()
+    was_connected = self.writer is not None
+    await self.connect()
+    try:
+      self.writer.write(RemoteMemcachedClient.PEERS_TYPE.format(cmd=cmd).encode('utf-8'))
+      await self.writer.drain()
+      res_bytes = await self.reader.readline()
+      return res_bytes.decode('utf-8')
+    finally:
+      if not was_connected and not self._managed:
+        await self.close()
 
-  def set(self, key, flags, exptime, value, noreply=False):
+  async def set(self, key, flags, exptime, value, noreply=False):
     """Send a memcached set command."""
-    return self._set_type('set', key, flags, exptime, value, noreply)
+    return await self._set_type('set', key, flags, exptime, value, noreply)
 
-  def add(self, key, flags, exptime, value, noreply=False):
+  async def add(self, key, flags, exptime, value, noreply=False):
     """Send a memcached add command."""
-    return self._set_type('add', key, flags, exptime, value, noreply)
+    return await self._set_type('add', key, flags, exptime, value, noreply)
 
-  def replace(self, key, flags, exptime, value, noreply=False):
+  async def replace(self, key, flags, exptime, value, noreply=False):
     """Send a memcached replace command."""
-    return self._set_type('replace', key, flags, exptime, value, noreply)
+    return await self._set_type('replace', key, flags, exptime, value, noreply)
 
-  def append(self, key, flags, exptime, value, noreply=False):
+  async def append(self, key, flags, exptime, value, noreply=False):
     """Send a memcached append command."""
-    return self._set_type('append', key, flags, exptime, value, noreply)
+    return await self._set_type('append', key, flags, exptime, value, noreply)
 
-  def prepend(self, key, flags, exptime, value, noreply=False):
+  async def prepend(self, key, flags, exptime, value, noreply=False):
     """Send a memcached prepend command."""
-    return self._set_type('prepend', key, flags, exptime, value, noreply)
+    return await self._set_type('prepend', key, flags, exptime, value, noreply)
 
-  def incr(self, key, value, noreply=False):
+  async def incr(self, key, value, noreply=False):
     """Send a memcached incr command."""
-    return self._incr_type('incr', key, value, noreply)
+    return await self._incr_type('incr', key, value, noreply)
 
-  def decr(self, key, value, noreply=False):
+  async def decr(self, key, value, noreply=False):
     """Send a memcached decr command."""
-    return self._incr_type('decr', key, value, noreply)
+    return await self._incr_type('decr', key, value, noreply)
 
-  def get(self, key):
+  async def get(self, key):
     """Send a memcached get command."""
-    return self._get_type('get', key)
+    return await self._get_type('get', key)
 
-  def delete(self, key, noreply=False):
+  async def delete(self, key, noreply=False):
     """Send a memcached delete command."""
-    return self._delete_type('delete', key, noreply)
+    return await self._delete_type('delete', key, noreply)
 
-  def quit(self):
+  async def quit(self):
     """Send a memcached quit command."""
-    self.wfd.write('quit\r\n')
-    self.socket.close()
+    if self.writer is not None:
+      self.writer.write(b'quit\r\n')
+      try:
+        await self.writer.drain()
+      except Exception:
+        pass
+      await self.close()
 
-  def peers(self):
+  async def peers(self):
     """Send a memcached peers command."""
-    return self._peers_type('peers')
+    return await self._peers_type('peers')
 
-  def join(self, addr, noreply=False):
+  async def join(self, addr, noreply=False):
     """Send a memcached join command."""
-    return self._join_type('join', addr, noreply)
+    return await self._join_type('join', addr, noreply)
 
-  def leave(self, addr, noreply=False):
+  async def leave(self, addr, noreply=False):
     """Send a memcached leave command."""
-    return self._join_type('leave', addr, noreply)
+    return await self._join_type('leave', addr, noreply)
 
 
 # ----------------------------------------------------------------------------
@@ -469,84 +532,95 @@ class CacheHandler(object):
   A client may issue multiple commands in sequence over the same
   connection.
 
-  The handler consist of three principle parts:
+  The handler consists of three principle parts:
 
     1. The REPL which loops on accepting new commands from the client
     2. The argument parsing methods, which parse arguments for the
        different types of commands (the commands can be divided into a
-       number of subsets with the same argument format).  These
+       number of subsets with the same argument format). These
        methods are called something like '_parse_XXX_args', where
        'XXX' is the name of the command, e.g. 'set'.
     3. The command methods, which implement the actual commands.
-       There is one method for each command.  These methods are caled
+       There is one method for each command. These methods are called
        something like 'do_XXX', where 'XXX' is the name of the
        command, e.g. 'set'.
 
   """
 
-  def __init__(self, socket, server):
+  def __init__(self, reader, writer, server):
     """Initialize a cache handler.
 
-    socket :: Socket        The TCP socket connection object
-    server :: CacheServer   The server object, which holds
-                            data common to all connections of a
-                            server
+    reader :: asyncio.StreamReader   The TCP socket reader stream
+    writer :: asyncio.StreamWriter   The TCP socket writer stream
+    server :: CacheServer            The server object, which holds
+                                     data common to all connections of a
+                                     server
 
     """
-    self.socket = socket
-    self.rfile = self.socket.makefile('r')
-    self.wfile = self.socket.makefile('w')
+    self.rfile = reader
+    self.wfile = writer
     self.server = server
 
-  def handle(self):
+  async def handle(self):
     """The REPL of the protocol stack.
 
     This method loops until a 'quit' command is issued, the
     connection is terminated by the client, or an internal server
-    error occur, handling the commands sent from one client.
+    error occurs, handling the commands sent from one client.
 
     """
-    while True:
-      line = self.rfile.readline().strip()
+    try:
+      while True:
+        line_bytes = await self.rfile.readline()
 
-      if line:
-        logging.info(line)
+        if not line_bytes:
+          logging.info('client disconnected')
+          break
 
-      if not line or line == 'quit':
-        logging.info('client disconnected')
-        break
+        line = line_bytes.decode('utf-8', errors='replace').strip()
 
-      # The command lines in our protocol consist of
-      # whitespace-separated strings terminated with '\r\n'. Each
-      # command has two corresponding methods in this class, one to
-      # parse the arguments into a dict (so that they can be used as
-      # keyword arguments), and one that implements the actual
-      # command. The methods have "magic" names, so that we can
-      # determine which method to run from the name of the command
-      # (e.g. for the "set" command, the two methods are called
-      # "_parse_set_args" and "do_set").
-      args = line.split()
+        if line:
+          logging.info(line)
 
+        if not line or line == 'quit':
+          logging.info('client disconnected')
+          break
+
+        # The command lines in our protocol consist of
+        # whitespace-separated strings terminated with '\r\n'. Each
+        # command has two corresponding methods in this class, one to
+        # parse the arguments into a dict (so that they can be used as
+        # keyword arguments), and one that implements the actual
+        # command.
+        args = line.split()
+
+        try:
+          func = getattr(self, 'do_' + args[0])
+          parse_args_func = getattr(self, '_parse_' + args[0] + '_args')
+          await func(**parse_args_func(args[1:]))
+        except SyntaxError as e:
+          self.wfile.write('CLIENT_ERROR {0}\r\n'.format(e).encode('utf-8'))
+          await self.wfile.drain()
+        except AttributeError:
+          self.wfile.write(b'ERROR\r\n')
+          await self.wfile.drain()
+        except Exception:
+          logging.exception('Internal server error')
+          self.wfile.write(b'SERVER_ERROR\r\n')
+          await self.wfile.drain()
+          break
+    finally:
       try:
-        func = getattr(self, 'do_' + args[0])
-        parse_args_func = getattr(self, '_parse_' + args[0] + '_args')
-        func(**parse_args_func(args[1:]))
-      except SyntaxError as e:
-        self.wfile.write('CLIENT_ERROR {0}\r\n'.format(e))
-      except AttributeError:
-        self.wfile.write('ERROR\r\n')
-      except:
-        logging.exception('Internal server error')
-        self.wfile.write('SERVER_ERROR\r\n')
-        break
-
-      self.wfile.flush()
+        self.wfile.close()
+        await self.wfile.wait_closed()
+      except Exception:
+        pass
 
   # --------------------------------------------------------------------------
   # Overlay Protocol: Rebalancing
   # --------------------------------------------------------------------------
 
-  def rebalance(self, addr):
+  async def rebalance(self, addr):
     """Check if any keys in this server should move to server at 'addr'.
 
     addr :: String   An address string on the form <ip-addr>:<port>,
@@ -555,21 +629,16 @@ class CacheHandler(object):
     If any of the keys we store are closer to the ID of the new node
     than to our ID, the key should move to the new node.
 
-    This method could be made more efficent, as we do not actually need
-    to check our keys against the new ID if it is not closer to our ID
-    than any of the other IDs of our peers. We have opted to keep
-    the method simple, at the expense of efficiency.
-
     """
     self.server.peers.add(addr)
 
     for key, value in list(self.server.cache.items()):
-      addr = closest(self.server.peers.union([self.server.addr]), key)
+      target_addr = closest(self.server.peers.union([self.server.addr]), key)
 
-      if addr != self.server.addr:
+      if target_addr != self.server.addr:
         flags, exptime, data = value
 
-        RemoteMemcachedClient(addr).set(key, flags, exptime, data)
+        await RemoteMemcachedClient(target_addr).set(key, flags, exptime, data)
 
         self.server.cache.delete(key)
 
@@ -619,9 +688,9 @@ class CacheHandler(object):
   _parse_append_args = _parse_set_args
   _parse_prepend_args = _parse_set_args
 
-  def _parse_cas_type(self, args):
+  def _parse_cas_args(self, args):
     """Parse the arguments for a cas-type command."""
-    pass
+    return {}
 
   def _parse_get_args(self, args):
     """Parse the arguments for a get-type command."""
@@ -642,7 +711,7 @@ class CacheHandler(object):
     return {'key': key, 'noreply': True if noreply else False}
 
   def _parse_incr_args(self, args):
-    """Parse the arguments of a incr-type command."""
+    """Parse the arguments of an incr-type command."""
     if len(args) == 2:
       key, value = args
       noreply = False
@@ -660,11 +729,11 @@ class CacheHandler(object):
 
   def _parse_stats_args(self, args):
     """Parse the arguments of a stats-type command."""
-    pass
+    return {}
 
   def _parse_flush_all_args(self, args):
     """Parse the arguments of a flush_all-type command."""
-    pass
+    return {}
 
   def _parse_version_args(self, args):
     """Parse the arguments of a version-type command."""
@@ -707,18 +776,18 @@ class CacheHandler(object):
   # Overlay Protocol: Command methods
   # --------------------------------------------------------------------------
 
-  def do_set(self, key, flags, exptime, length, noreply):
+  async def do_set(self, key, flags, exptime, length, noreply):
     """Store data in the cache.
 
     set <key> <flags> <exptime> <bytes> [noreply]
 
     """
-    # FIXME: (mjl 2011-05-10) We should really read 'length' + 2 bytes
-    #        and strip out the '\r\n'...
-    data = self.rfile.readline().strip('\r\n')
+    data_bytes = await self.rfile.readline()
+    data = data_bytes.decode('utf-8', errors='replace').strip('\r\n')
 
     if length != len(data):
-      self.wfile.write('CLIENT_ERROR data does not match size\r\n')
+      self.wfile.write(b'CLIENT_ERROR data does not match size\r\n')
+      await self.wfile.drain()
       return
 
     addr = closest(self.server.peers.union([self.server.addr]), key)
@@ -726,22 +795,25 @@ class CacheHandler(object):
     if addr == self.server.addr:
       res = self.server.cache.set(key, flags, exptime, data)
     else:
-      res = RemoteMemcachedClient(addr).set(key, flags, exptime, data)
+      res = await RemoteMemcachedClient(addr).set(key, flags, exptime, data)
 
     if not noreply:
-      self.wfile.write(res)
+      self.wfile.write(res.encode('utf-8'))
+      await self.wfile.drain()
 
-  def do_add(self, key, flags, exptime, length, noreply):
+  async def do_add(self, key, flags, exptime, length, noreply):
     """Store data only if the server does not already hold data for
     this key.
 
     add <key> <flags> <exptime> <bytes> [noreply]
 
     """
-    data = self.rfile.readline().strip('\r\n')
+    data_bytes = await self.rfile.readline()
+    data = data_bytes.decode('utf-8', errors='replace').strip('\r\n')
 
     if length != len(data):
-      self.wfile.write('CLIENT_ERROR data does not match size\r\n')
+      self.wfile.write(b'CLIENT_ERROR data does not match size\r\n')
+      await self.wfile.drain()
       return
 
     addr = closest(self.server.peers.union([self.server.addr]), key)
@@ -749,22 +821,25 @@ class CacheHandler(object):
     if addr == self.server.addr:
       res = self.server.cache.add(key, flags, exptime, data)
     else:
-      res = RemoteMemcachedClient(addr).add(key, flags, exptime, data)
+      res = await RemoteMemcachedClient(addr).add(key, flags, exptime, data)
 
     if not noreply:
-      self.wfile.write(res)
+      self.wfile.write(res.encode('utf-8'))
+      await self.wfile.drain()
 
-  def do_replace(self, key, flags, exptime, length, noreply):
+  async def do_replace(self, key, flags, exptime, length, noreply):
     """Store data only if the server does already hold data for this
     key.
 
     replace <key> <flags> <exptime> <bytes> [noreply]
 
     """
-    data = self.rfile.readline().strip('\r\n')
+    data_bytes = await self.rfile.readline()
+    data = data_bytes.decode('utf-8', errors='replace').strip('\r\n')
 
     if length != len(data):
-      self.wfile.write('CLIENT_ERROR data does not match size\r\n')
+      self.wfile.write(b'CLIENT_ERROR data does not match size\r\n')
+      await self.wfile.drain()
       return
 
     addr = closest(self.server.peers.union([self.server.addr]), key)
@@ -772,21 +847,24 @@ class CacheHandler(object):
     if addr == self.server.addr:
       res = self.server.cache.replace(key, flags, exptime, data)
     else:
-      res = RemoteMemcachedClient(addr).replace(key, flags, exptime, data)
+      res = await RemoteMemcachedClient(addr).replace(key, flags, exptime, data)
 
     if not noreply:
-      self.wfile.write(res)
+      self.wfile.write(res.encode('utf-8'))
+      await self.wfile.drain()
 
-  def do_append(self, key, flags, exptime, length, noreply):
+  async def do_append(self, key, flags, exptime, length, noreply):
     """Add data to an existing key, after existing data.
 
     append <key> <flags> <exptime> <bytes> [noreply]
 
     """
-    data = self.rfile.readline().strip('\r\n')
+    data_bytes = await self.rfile.readline()
+    data = data_bytes.decode('utf-8', errors='replace').strip('\r\n')
 
     if length != len(data):
-      self.wfile.write('CLIENT_ERROR data does not match size\r\n')
+      self.wfile.write(b'CLIENT_ERROR data does not match size\r\n')
+      await self.wfile.drain()
       return
 
     addr = closest(self.server.peers.union([self.server.addr]), key)
@@ -794,21 +872,24 @@ class CacheHandler(object):
     if addr == self.server.addr:
       res = self.server.cache.append(key, data)
     else:
-      res = RemoteMemcachedClient(addr).append(key, flags, exptime, data)
+      res = await RemoteMemcachedClient(addr).append(key, flags, exptime, data)
 
     if not noreply:
-      self.wfile.write(res)
+      self.wfile.write(res.encode('utf-8'))
+      await self.wfile.drain()
 
-  def do_prepend(self, key, flags, exptime, length, noreply):
+  async def do_prepend(self, key, flags, exptime, length, noreply):
     """Add data to an existing key, before existing data.
 
     prepend <key> <flags> <exptime> <bytes> [noreply]
 
     """
-    data = self.rfile.readline().strip('\r\n')
+    data_bytes = await self.rfile.readline()
+    data = data_bytes.decode('utf-8', errors='replace').strip('\r\n')
 
     if length != len(data):
-      self.wfile.write('CLIENT_ERROR data does not match size\r\n')
+      self.wfile.write(b'CLIENT_ERROR data does not match size\r\n')
+      await self.wfile.drain()
       return
 
     addr = closest(self.server.peers.union([self.server.addr]), key)
@@ -816,21 +897,23 @@ class CacheHandler(object):
     if addr == self.server.addr:
       res = self.server.cache.prepend(key, data)
     else:
-      res = RemoteMemcachedClient(addr).prepend(key, flags, exptime, data)
+      res = await RemoteMemcachedClient(addr).prepend(key, flags, exptime, data)
 
     if not noreply:
-      self.wfile.write(res)
+      self.wfile.write(res.encode('utf-8'))
+      await self.wfile.drain()
 
-  def do_cas(self, *args):
+  async def do_cas(self, *args):
     """Check and Set - Store data, but only if no one else has updated
     since I last fetched it.
 
     cas <key> <flags> <exptime> <bytes> <cas unique> [noreply]
 
     """
-    self.wfile.write('SERVER_ERROR command not implemented\r\n')
+    self.wfile.write(b'SERVER_ERROR command not implemented\r\n')
+    await self.wfile.drain()
 
-  def do_get(self, keys):
+  async def do_get(self, keys):
     """Get value(s) for key(s).
 
     get <key>*
@@ -842,27 +925,29 @@ class CacheHandler(object):
       if addr == self.server.addr:
         res = self.server.cache.get(key)
       else:
-        res = RemoteMemcachedClient(addr).get(key)
+        res = await RemoteMemcachedClient(addr).get(key)
 
       if res:
-        key, flags, data = res
+        key_val, flags, data = res
 
-        self.wfile.write('VALUE {0} {1} {2}\r\n'.format(key,
+        self.wfile.write('VALUE {0} {1} {2}\r\n'.format(key_val,
                                                         flags,
-                                                        len(data)))
-        self.wfile.write('{0}\r\n'.format(data))
+                                                        len(data)).encode('utf-8'))
+        self.wfile.write('{0}\r\n'.format(data).encode('utf-8'))
 
-    self.wfile.write('END\r\n')
+    self.wfile.write(b'END\r\n')
+    await self.wfile.drain()
 
-  def do_gets(self, keys):
+  async def do_gets(self, keys):
     """Get value(s) for key(s).
 
     gets <key>*
 
     """
-    self.wfile.write('SERVER_ERROR command not implemented\r\n')
+    self.wfile.write(b'SERVER_ERROR command not implemented\r\n')
+    await self.wfile.drain()
 
-  def do_delete(self, key, noreply):
+  async def do_delete(self, key, noreply):
     """Delete value stored for a specific key.
 
     delete <key> [noreply]
@@ -873,12 +958,13 @@ class CacheHandler(object):
     if addr == self.server.addr:
       res = self.server.cache.delete(key)
     else:
-      res = RemoteMemcachedClient(addr).delete(key)
+      res = await RemoteMemcachedClient(addr).delete(key)
 
     if not noreply:
-      self.wfile.write(res)
+      self.wfile.write(res.encode('utf-8'))
+      await self.wfile.drain()
 
-  def do_incr(self, key, value, noreply):
+  async def do_incr(self, key, value, noreply):
     """Increment the stored value for the given key with the given
     amount.
 
@@ -890,12 +976,13 @@ class CacheHandler(object):
     if addr == self.server.addr:
       res = self.server.cache.incr(key, value)
     else:
-      res = RemoteMemcachedClient(addr).incr(key, value)
+      res = await RemoteMemcachedClient(addr).incr(key, value)
 
     if not noreply:
-      self.wfile.write(res)
+      self.wfile.write(res.encode('utf-8'))
+      await self.wfile.drain()
 
-  def do_decr(self, key, value, noreply):
+  async def do_decr(self, key, value, noreply):
     """Decrement the stored value for the given key with the given
     amount.
 
@@ -907,67 +994,77 @@ class CacheHandler(object):
     if addr == self.server.addr:
       res = self.server.cache.decr(key, value)
     else:
-      res = RemoteMemcachedClient(addr).decr(key, value)
+      res = await RemoteMemcachedClient(addr).decr(key, value)
 
     if not noreply:
-      self.wfile.write(res)
+      self.wfile.write(res.encode('utf-8'))
+      await self.wfile.drain()
 
-  def do_stats(self, *args):
+  async def do_stats(self, *args):
     """Query about statistics.
 
     stats <args>
 
     """
-    self.wfile.write('SERVER_ERROR command not implemented\r\n')
+    self.wfile.write(b'SERVER_ERROR command not implemented\r\n')
+    await self.wfile.drain()
 
-  def do_flush_all(self, exptime, noreply):
+  async def do_flush_all(self, *args):
     """Flush all items from the cache.
 
     flush_all [exptime] [noreply]
 
     """
-    self.wfile.write('SERVER_ERROR command not implemented\r\n')
+    self.wfile.write(b'SERVER_ERROR command not implemented\r\n')
+    await self.wfile.drain()
 
-  def do_version(self):
+  async def do_version(self):
     """Return the version of the server."""
-    self.wfile.write('VERSION {0} ({1})\r\n'.format(VERSION, self.server.kid))
+    self.wfile.write('VERSION {0} ({1})\r\n'.format(VERSION, self.server.kid).encode('utf-8'))
+    await self.wfile.drain()
 
-  def do_verbosity(self, level, noreply):
+  async def do_verbosity(self, level, noreply):
     """Set the logging verbosity level."""
     logging.basicConfig(level=level * 10)
 
     if not noreply:
-      self.wfile.write('OK\r\n')
+      self.wfile.write(b'OK\r\n')
+      await self.wfile.drain()
 
-  def do_quit(self):
+  async def do_quit(self):
     """Close the connection."""
-    # This method is intentionally left blank.
+    # Handled in REPL loop.
+    pass
 
-  def do_dump(self):
+  async def do_dump(self):
     if self.server.debug:
       for key, value in self.server.cache.items():
         logging.debug('{0}:{1}'.format(key, value))
-        self.wfile.write('{0}:{1}\r\n'.format(key, value))
+        self.wfile.write('{0}:{1}\r\n'.format(key, value).encode('utf-8'))
 
-      self.wfile.write('END\r\n')
+      self.wfile.write(b'END\r\n')
+      await self.wfile.drain()
     else:
       raise SyntaxError('Not running in debug mode')
 
-  def do_peers(self):
+  async def do_peers(self):
     """Return all peer addresses, including our own."""
-    self.wfile.write(' '.join(self.server.peers.union([self.server.addr])) + '\r\n')
+    all_peers = ' '.join(self.server.peers.union([self.server.addr])) + '\r\n'
+    self.wfile.write(all_peers.encode('utf-8'))
+    await self.wfile.drain()
 
-  def do_join(self, addr, noreply):
+  async def do_join(self, addr, noreply):
     """Handle a new node joining the mesh."""
     if addr not in self.server.peers:
-      self.rebalance(addr)
+      await self.rebalance(addr)
 
     logging.info('Peers {}'.format(self.server.peers))
 
     if not noreply:
-      self.wfile.write('OK\r\n')
+      self.wfile.write(b'OK\r\n')
+      await self.wfile.drain()
 
-  def do_leave(self, addr, noreply):
+  async def do_leave(self, addr, noreply):
     """Handle a node leaving the mesh."""
     if addr in self.server.peers:
       self.server.peers.remove(addr)
@@ -978,44 +1075,38 @@ class CacheHandler(object):
     logging.info('Server ID {0} peers {1}'.format(self.server.kid, self.server.peers))
 
     if not noreply:
-      self.wfile.write(res)
+      self.wfile.write(res.encode('utf-8'))
+      await self.wfile.drain()
 
 
 # ----------------------------------------------------------------------------
-class JoinGreenlet(Greenlet):
-  def __init__(self, peer, addr, peers):
-    """A greenlet used to join a node to a mesh.
+async def join_mesh(peer, addr, peers):
+  """Asynchronously join an existing mesh via seed peer.
 
-    peer :: String        The address of one of the peers to the node
-                          on the form '192.0.2.13:6001'.
-    addr :: String        The address of the new node on the form
-                          '192.0.2.13:6000'.
-    peers :: Set(String)  A set of peers on the form '192.0.2.13:6001'.
+  peer :: String        The address of one of the peers to the node
+                        on the form '192.0.2.13:6001'.
+  addr :: String        The address of the new node on the form
+                        '192.0.2.13:6000'.
+  peers :: Set(String)  A set of peers on the form '192.0.2.13:6001'.
 
-    The peers set is normally an empty set when this greentlet
-    is started. We will then add peers to that set according
-    to the peers we recieve from the one peer we ask.
+  """
+  try:
+    peer_client = RemoteMemcachedClient(peer)
+    peers_str = await peer_client.peers()
+    existing_peers = peers_str.split() if peers_str else []
 
-    """
-    Greenlet.__init__(self)
-    self.peer = peer
-    self.addr = addr
-    self.peers = peers
-
-  def _run(self):
-    # First we ask our peer for all the existing peers in the mesh...
-    peers = RemoteMemcachedClient(self.peer).peers().split()
-
-    # ...and then we join all those peers...
-    for peer in peers:
-      RemoteMemcachedClient(peer).join(self.addr, True)
-      self.peers.add(peer)
+    for p in existing_peers:
+      if p != addr:
+        await RemoteMemcachedClient(p).join(addr, noreply=True)
+        peers.add(p)
+  except Exception as e:
+    logging.error('Failed to join mesh via {0}: {1}'.format(peer, e))
 
 
 # ----------------------------------------------------------------------------
 class CacheServer(object):
-  def __init__(self, addr, cache, peer, debug=False):
-    """Create a cache listener.
+  def __init__(self, addr, cache, peer=None, debug=False):
+    """Create a cache server.
 
     addr :: String        The address of this node. A string on the
                           form '192.0.2.13:6000'.
@@ -1027,53 +1118,72 @@ class CacheServer(object):
 
     """
     self.addr = addr
-    self.kid = hash(addr)
+    self.kid = dht_hash(addr)
     self.cache = cache
     self.peers = set()
     self.debug = debug
-
-    if peer:
-      JoinGreenlet.spawn(peer, addr, self.peers)
+    self.peer = peer
+    self._server = None
+    self._tasks = set()
 
     logging.info('Server ID {0} @ {1} peers {2}'.format(self.kid,
                                                         self.addr,
                                                         self.peers))
 
-  def __call__(self, socket, address):
-    logging.info('New connection from {0[0]}:{0[1]}'.format(address))
+  async def handle_connection(self, reader, writer):
+    """Callback invoked by asyncio.start_server for each client connection."""
+    client_addr = writer.get_extra_info('peername')
+    logging.info('New connection from {0[0]}:{0[1]}'.format(client_addr) if client_addr else 'New connection')
+    handler = CacheHandler(reader, writer, self)
+    await handler.handle()
 
-    CacheHandler(socket, self).handle()
+  async def start(self):
+    """Start listening on the configured address."""
+    host, port = split_addr(self.addr)
+    self._server = await asyncio.start_server(self.handle_connection, host, port)
 
-  def leave(self):
+    if port == 0 and self._server.sockets:
+      actual_port = self._server.sockets[0].getsockname()[1]
+      self.addr = '{0}:{1}'.format(host, actual_port)
+      self.kid = dht_hash(self.addr)
+
+    if self.peer:
+      task = asyncio.create_task(join_mesh(self.peer, self.addr, self.peers))
+      self._tasks.add(task)
+      task.add_done_callback(self._tasks.discard)
+
+    return self._server
+
+  async def leave(self):
     """Have this node leave the mesh.
 
     This method first sends the leave command to all
-    peers, so that they remove this node form their
+    peers, so that they remove this node from their
     peer lists. Then we move our key/value pairs to
     the appropriate node still in the mesh.
-
-    There is a reace condition here, if another node
-    leaves at approximately the same time. That may lead
-    to us believing that node is still part of the mesh,
-    and trying to hand over key/value pairs to it. We do
-    not currently handle that situation.
 
     """
     if not self.peers:
       logging.info('I am the last of my kind, my knowledge will be forever lost.')
       return
 
-    for peer in self.peers:
+    for peer in list(self.peers):
       logging.info('Sending leave to {}'.format(peer))
-      RemoteMemcachedClient(peer).leave(self.addr)
+      try:
+        await RemoteMemcachedClient(peer).leave(self.addr)
+      except Exception as e:
+        logging.warning('Could not send leave to {0}: {1}'.format(peer, e))
 
-    for key, value in self.cache.items():
+    for key, value in list(self.cache.items()):
       flags, exptime, data = value
       addr = closest(self.peers, key)
 
-      logging.info('Handing over {0}:{1} to {2}'.format(key, value, addr))
-
-      RemoteMemcachedClient(addr).set(key, flags, exptime, data)
+      if addr:
+        logging.info('Handing over {0}:{1} to {2}'.format(key, value, addr))
+        try:
+          await RemoteMemcachedClient(addr).set(key, flags, exptime, data)
+        except Exception as e:
+          logging.warning('Could not hand over {0} to {1}: {2}'.format(key, addr, e))
 
 
 # ----------------------------------------------------------------------------
@@ -1086,7 +1196,7 @@ def split_addr(addr):
   returns a tuple (host :: String, port :: Integer), e.g. ('192.0.2.13', 4545)
 
   """
-  (host, port) = addr.split(':')
+  (host, port) = addr.rsplit(':', 1)
   return (host, int(port))
 
 
@@ -1097,14 +1207,18 @@ def current_time():
 
 
 # ----------------------------------------------------------------------------
-def hash(val):
+def dht_hash(val):
   """Calculate the SHA1 hash of a value."""
-  return int(hashlib.sha1(val.encode()).hexdigest(), 16)
+  return int(hashlib.sha1(val.encode('utf-8')).hexdigest(), 16)
+
+
+# Alias hash to dht_hash for backwards compatibility
+hash = dht_hash
 
 
 # ----------------------------------------------------------------------------
 def distance(a, b):
-  """Calculate the distance between to keys like a xor b."""
+  """Calculate the distance between two keys like a xor b."""
   return a ^ b
 
 
@@ -1119,8 +1233,8 @@ def closest(peers, key):
 
   """
   if peers:
-    key_hash = hash(key)
-    dists = [(distance(key_hash, hash(x)), x) for x in peers]
+    key_hash = dht_hash(key)
+    dists = [(distance(key_hash, dht_hash(x)), x) for x in peers]
     _, addr = min(dists)
     return addr
   else:
@@ -1128,7 +1242,7 @@ def closest(peers, key):
 
 
 # ----------------------------------------------------------------------------
-if __name__ == '__main__':
+async def main(args=None):
   import argparse
 
   parser = argparse.ArgumentParser(description='A DHT based caching server')
@@ -1146,19 +1260,29 @@ if __name__ == '__main__':
                       action='store_true',
                       help='Run in debug mode')
 
-  args = parser.parse_args()
+  parsed_args = parser.parse_args(args)
 
-  logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
+  logging.basicConfig(level=logging.DEBUG if parsed_args.debug else logging.INFO)
 
-  logging.info('Starting server @ {0}'.format(args.addr))
+  logging.info('Starting server @ {0}'.format(parsed_args.addr))
 
-  cs =  CacheServer(args.addr, LocalMemcachedClient({}), args.peer, args.debug)
-  server = StreamServer(split_addr(args.addr), cs)
+  cs = CacheServer(parsed_args.addr, LocalMemcachedClient({}), parsed_args.peer, parsed_args.debug)
+  server = await cs.start()
 
+  async with server:
+    try:
+      await server.serve_forever()
+    except (asyncio.CancelledError, KeyboardInterrupt):
+      pass
+    finally:
+      logging.info('Leaving mesh...')
+      await cs.leave()
+
+
+if __name__ == '__main__':
   try:
-    server.serve_forever()
+    asyncio.run(main())
   except KeyboardInterrupt:
-    logging.info('Leaving mesh...')
-    cs.leave()
+    pass
 
 # vim: sw=2 sts=2 et

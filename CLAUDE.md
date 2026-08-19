@@ -39,13 +39,13 @@ Everything lives in two files: `pycache.py` (implementation) and `pycache_test.p
 
 - **`LocalMemcachedClient`** — Wraps a plain dict to provide a memcached-like interface. Values are stored as `(flags, exptime, data)` tuples. Handles expiration and numeric operations.
 
-- **`RemoteMemcachedClient`** — TCP client that speaks the memcached text protocol to remote nodes. Also handles the custom overlay protocol commands (`peers`, `join`, `leave`).
+- **`RemoteMemcachedClient`** — Async TCP client that speaks the memcached text protocol to remote nodes using `asyncio.open_connection`. Also handles the custom overlay protocol commands (`peers`, `join`, `leave`).
 
-- **`CacheHandler`** — Handles a single TCP connection. Contains the command REPL: parses memcached commands, forwards requests to the responsible node (via `RemoteMemcachedClient`) or handles them locally, and implements rebalancing when nodes join.
+- **`CacheHandler`** — Handles a single TCP connection. Contains the async command REPL: parses memcached commands, forwards requests to the responsible node (via `RemoteMemcachedClient`) or handles them locally, and implements rebalancing when nodes join.
 
-- **`CacheServer`** — Represents a single DHT node. Holds the local cache, the node's ID (`kid` = SHA1 of its address), and the set of known peers. Uses `gevent.server.StreamServer` for non-blocking I/O.
+- **`CacheServer`** — Represents a single DHT node. Holds the local cache, the node's ID (`kid` = SHA1 of its address), and the set of known peers. Uses `asyncio.start_server` for non-blocking I/O.
 
-- **`JoinGreenlet`** — Spawned when a node starts with `--peer`. Contacts the peer to discover all existing nodes, then broadcasts a `join` notification to each.
+- **`join_mesh`** — Async coroutine spawned when a node starts with `--peer`. Contacts the peer to discover all existing nodes, then broadcasts a `join` notification to each.
 
 ### DHT Design
 
@@ -57,7 +57,7 @@ Everything lives in two files: `pycache.py` (implementation) and `pycache_test.p
 
 ### Concurrency Model
 
-Uses `gevent` greenlets — single-threaded cooperative concurrency. The code is **not thread-safe**, which is intentional. There is no connection pooling; each inter-node RPC opens a fresh TCP connection.
+Uses standard library `asyncio` with native coroutines and `async`/`await`. Single-threaded cooperative concurrency with zero external runtime dependencies.
 
 ### Protocol Extensions
 
