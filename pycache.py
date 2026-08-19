@@ -18,7 +18,32 @@ import logging
 import time
 
 
-VERSION = '0.2.0'
+def _get_version() -> str:
+  """Get package version from installed metadata or local pyproject.toml."""
+  try:
+    from importlib.metadata import version, PackageNotFoundError
+    return version('pycache')
+  except (PackageNotFoundError, ImportError):
+    pass
+  except Exception:
+    pass
+
+  try:
+    import pathlib
+    import tomllib
+    pyproject_path = pathlib.Path(__file__).resolve().parent / 'pyproject.toml'
+    if pyproject_path.is_file():
+      with open(pyproject_path, 'rb') as f:
+        data = tomllib.load(f)
+        return data.get('project', {}).get('version', 'unknown')
+  except Exception:
+    pass
+
+  return 'unknown'
+
+
+VERSION = _get_version()
+__version__ = VERSION
 
 
 # This module contains an implementation of a DHT supporting a subset

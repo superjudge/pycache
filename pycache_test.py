@@ -48,6 +48,11 @@ class HelperTestCase(unittest.TestCase):
     self.assertEqual(pycache.nr(True), ' noreply')
     self.assertEqual(pycache.nr(False), '')
 
+  def test_dynamic_version(self):
+    self.assertNotEqual(pycache.VERSION, 'unknown')
+    self.assertEqual(pycache.VERSION, pycache.__version__)
+    self.assertEqual(pycache.VERSION, '0.2.0')
+
 
 class CacheTestCase(unittest.TestCase):
 
